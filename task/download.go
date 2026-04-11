@@ -179,6 +179,7 @@ func downloadHandler(ip *net.IPAddr, onProgress func(float64)) (float64, string)
 
 	response, err := client.Do(req)
 	if err != nil {
+		reportRequestFailure()
 		if utils.Debug { // 调试模式下，输出更多信息
 			printDownloadDebugInfo(ip, err, 0, URL, lastRedirectURL, response)
 		}
@@ -186,11 +187,13 @@ func downloadHandler(ip *net.IPAddr, onProgress func(float64)) (float64, string)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != 200 {
+		reportRequestFailure()
 		if utils.Debug { // 调试模式下，输出更多信息
 			printDownloadDebugInfo(ip, nil, response.StatusCode, URL, lastRedirectURL, response)
 		}
 		return 0.0, ""
 	}
+	reportRequestSuccess()
 	if onProgress != nil {
 		onProgress(0)
 	}

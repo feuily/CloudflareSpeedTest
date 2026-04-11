@@ -28,6 +28,13 @@ func isValidHTTPStatusCode(statusCode int) bool {
 	return statusCode >= 100 && statusCode <= 599
 }
 
+func isAllowedHttpingStatus(statusCode int) bool {
+	if !isValidHTTPStatusCode(HttpingStatusCode) {
+		return statusCode == 200 || statusCode == 301 || statusCode == 302
+	}
+	return statusCode == HttpingStatusCode
+}
+
 // pingReceived pingTotalTime
 func (p *Ping) httping(ip *net.IPAddr) (int, time.Duration, string) {
 	hc := http.Client{
@@ -58,6 +65,7 @@ func (p *Ping) httping(ip *net.IPAddr) (int, time.Duration, string) {
 		request.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_12_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/98.0.4758.80 Safari/537.36")
 		response, err := hc.Do(request)
 		if err != nil {
+			reportRequestFailure()
 			if utils.Debug { // 调试模式下，输出更多信息
 				utils.Red.Printf("[调试] IP: %s, 延迟测速失败，错误信息: %v, 测速地址: %s\n", ip.String(), err, URL)
 			}
@@ -69,21 +77,18 @@ func (p *Ping) httping(ip *net.IPAddr) (int, time.Duration, string) {
 
 		//fmt.Println("IP:", ip, "StatusCode:", response.StatusCode, response.Request.URL)
 		// 如果未指定的 HTTP 状态码，或指定的状态码不合规，则默认只认为 200、301、302 才算 HTTPing 通过
-		if !isValidHTTPStatusCode(HttpingStatusCode) {
-			if response.StatusCode != 200 && response.StatusCode != 301 && response.StatusCode != 302 {
-				if utils.Debug { // 调试模式下，输出更多信息
+		if !isAllowedHttpingStatus(response.StatusCode) {
+			reportRequestFailure()
+			if utils.Debug { // 调试模式下，输出更多信息
+				if isValidHTTPStatusCode(HttpingStatusCode) {
+					utils.Red.Printf("[调试] IP: %s, 延迟测速终止，HTTP 状态码: %d, 指定的 HTTP 状态码 %d, 测速地址: %s\n", ip.String(), response.StatusCode, HttpingStatusCode, URL)
+				} else {
 					utils.Red.Printf("[调试] IP: %s, 延迟测速终止，HTTP 状态码: %d, 测速地址: %s\n", ip.String(), response.StatusCode, URL)
 				}
-				return 0, 0, ""
 			}
-		} else {
-			if response.StatusCode != HttpingStatusCode {
-				if utils.Debug { // 调试模式下，输出更多信息
-					utils.Red.Printf("[调试] IP: %s, 延迟测速终止，HTTP 状态码: %d, 指定的 HTTP 状态码 %d, 测速地址: %s\n", ip.String(), response.StatusCode, HttpingStatusCode, URL)
-				}
-				return 0, 0, ""
-			}
+			return 0, 0, ""
 		}
+		reportRequestSuccess()
 
 		io.Copy(io.Discard, response.Body)
 
@@ -119,8 +124,16 @@ func (p *Ping) httping(ip *net.IPAddr) (int, time.Duration, string) {
 		startTime := time.Now()
 		response, err := hc.Do(request)
 		if err != nil {
+			reportRequestFailure()
 			continue
 		}
+		if !isAllowedHttpingStatus(response.StatusCode) {
+			reportRequestFailure()
+			io.Copy(io.Discard, response.Body)
+			_ = response.Body.Close()
+			continue
+		}
+		reportRequestSuccess()
 		success++
 		io.Copy(io.Discard, response.Body)
 		_ = response.Body.Close()

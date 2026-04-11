@@ -4,12 +4,18 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/XIU2/CloudflareSpeedTest/utils"
 )
 
 const (
-	defaultHTTPQPSMin    = 10
-	defaultHTTPQPSMax    = 30
-	defaultHTTPQPSFactor = 4
+	defaultHTTPQPSMin      = 10
+	defaultHTTPQPSMax      = 30
+	defaultHTTPQPSFactor   = 4
+	adaptiveHTTPQPSFloor   = 4
+	failureAdjustThreshold = 2
+	successAdjustThreshold = 24
+	minQPSRecoveryIncrease = 1
 )
 
 var RequestQPS int
@@ -17,14 +23,20 @@ var RequestQPS int
 var globalRequestLimiter = &requestLimiter{}
 
 type requestLimiter struct {
-	mu      sync.RWMutex
-	tokenCh chan struct{}
-	stopCh  chan struct{}
+	mu            sync.RWMutex
+	tokenCh       chan struct{}
+	stopCh        chan struct{}
+	qps           int
+	baseQPS       int
+	autoAdjust    bool
+	failureStreak int
+	successStreak int
 }
 
 func configureRequestLimiter() {
 	qps := resolveRequestQPS()
-	globalRequestLimiter.configure(qps)
+	autoAdjust := RequestQPS == 0 && Httping && qps > 0
+	globalRequestLimiter.configure(qps, autoAdjust)
 }
 
 func resolveRequestQPS() int {
@@ -47,19 +59,23 @@ func resolveRequestQPS() int {
 	return qps
 }
 
-func (r *requestLimiter) configure(qps int) {
+func (r *requestLimiter) configure(qps int, autoAdjust bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if r.stopCh != nil {
-		close(r.stopCh)
-		r.stopCh = nil
-	}
-	r.tokenCh = nil
+	r.stopLocked()
+	r.qps = qps
+	r.baseQPS = qps
+	r.autoAdjust = autoAdjust
+	r.failureStreak = 0
+	r.successStreak = 0
 	if qps <= 0 {
 		return
 	}
+	r.startLocked(qps)
+}
 
+func (r *requestLimiter) startLocked(qps int) {
 	interval := time.Second / time.Duration(qps)
 	if interval <= 0 {
 		interval = time.Nanosecond
@@ -86,6 +102,71 @@ func (r *requestLimiter) configure(qps int) {
 
 	r.tokenCh = tokenCh
 	r.stopCh = stopCh
+}
+
+func (r *requestLimiter) stopLocked() {
+	if r.stopCh != nil {
+		close(r.stopCh)
+		r.stopCh = nil
+	}
+	r.tokenCh = nil
+}
+
+func (r *requestLimiter) adjustLocked(nextQPS int, reason string) {
+	if nextQPS <= 0 || nextQPS == r.qps {
+		return
+	}
+	oldQPS := r.qps
+	r.stopLocked()
+	r.qps = nextQPS
+	r.startLocked(nextQPS)
+	if reason != "" {
+		utils.Yellow.Printf("[提示] 请求速率自动调整：%d -> %d QPS（%s）\n", oldQPS, nextQPS, reason)
+	}
+}
+
+func (r *requestLimiter) reportSuccess() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.autoAdjust || r.qps <= 0 {
+		return
+	}
+	r.failureStreak = 0
+	r.successStreak++
+	if r.successStreak < successAdjustThreshold {
+		return
+	}
+	r.successStreak = 0
+	if r.qps >= r.baseQPS {
+		return
+	}
+	nextQPS := r.qps + maxInt(minQPSRecoveryIncrease, r.qps/5)
+	if nextQPS > r.baseQPS {
+		nextQPS = r.baseQPS
+	}
+	r.adjustLocked(nextQPS, "连续成功，逐步恢复")
+}
+
+func (r *requestLimiter) reportFailure() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.autoAdjust || r.qps <= 0 {
+		return
+	}
+	r.successStreak = 0
+	r.failureStreak++
+	if r.failureStreak < failureAdjustThreshold {
+		return
+	}
+	r.failureStreak = 0
+	if r.qps <= adaptiveHTTPQPSFloor {
+		return
+	}
+	nextQPS := r.qps * 3 / 4
+	if nextQPS < adaptiveHTTPQPSFloor {
+		nextQPS = adaptiveHTTPQPSFloor
+	}
+	r.adjustLocked(nextQPS, "连续失败，自动退避")
 }
 
 func (r *requestLimiter) wait() {
@@ -116,4 +197,19 @@ func newRateLimitedTransport(base http.RoundTripper) http.RoundTripper {
 
 func waitForRequestSlot() {
 	globalRequestLimiter.wait()
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func reportRequestSuccess() {
+	globalRequestLimiter.reportSuccess()
+}
+
+func reportRequestFailure() {
+	globalRequestLimiter.reportFailure()
 }
