@@ -126,23 +126,33 @@ func (p *Ping) tcping(ip *net.IPAddr) (bool, time.Duration) {
 }
 
 // pingReceived pingTotalTime
-func (p *Ping) checkConnection(ip *net.IPAddr) (recv int, totalDelay time.Duration, colo string) {
+func (p *Ping) checkConnection(ip *net.IPAddr) (recv int, totalDelay, jitter time.Duration, colo string) {
 	if Httping {
-		recv, totalDelay, colo = p.httping(ip)
+		recv, totalDelay, jitter, colo = p.httping(ip)
 		return
 	}
 	colo = "" // TCPing 不获取 colo
 	failed := 0
+	var minDelay, maxDelay time.Duration
 	for i := 0; i < PingTimes; i++ {
 		if ok, delay := p.tcping(ip); ok {
 			recv++
 			totalDelay += delay
+			if minDelay == 0 || delay < minDelay {
+				minDelay = delay
+			}
+			if delay > maxDelay {
+				maxDelay = delay
+			}
 			continue
 		}
 		failed++
 		if shouldAbortByLossRate(failed) {
 			break
 		}
+	}
+	if recv > 0 {
+		jitter = maxDelay - minDelay
 	}
 	return
 }
@@ -164,7 +174,7 @@ func (p *Ping) availableCount() int {
 
 // handle tcping
 func (p *Ping) tcpingHandler(ip *net.IPAddr) {
-	recv, totalDlay, colo := p.checkConnection(ip)
+	recv, totalDlay, jitter, colo := p.checkConnection(ip)
 	if recv == 0 {
 		p.bar.Grow(1, strconv.Itoa(p.availableCount()))
 		return
@@ -174,6 +184,7 @@ func (p *Ping) tcpingHandler(ip *net.IPAddr) {
 		Sended:   PingTimes,
 		Received: recv,
 		Delay:    totalDlay / time.Duration(recv),
+		Jitter:   jitter,
 		Colo:     colo,
 	}
 	p.bar.Grow(1, strconv.Itoa(p.appendIPData(data)))

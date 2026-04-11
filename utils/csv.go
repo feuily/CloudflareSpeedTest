@@ -40,6 +40,7 @@ type PingData struct {
 	Sended   int
 	Received int
 	Delay    time.Duration
+	Jitter   time.Duration
 	Colo     string
 }
 
@@ -157,7 +158,13 @@ func (s PingDelaySet) Less(i, j int) bool {
 	if iRate != jRate {
 		return iRate < jRate
 	}
-	return s[i].Delay < s[j].Delay
+	if s[i].Delay != s[j].Delay {
+		return s[i].Delay < s[j].Delay
+	}
+	if s[i].Jitter != s[j].Jitter {
+		return s[i].Jitter < s[j].Jitter
+	}
+	return s[i].DownloadSpeed > s[j].DownloadSpeed
 }
 func (s PingDelaySet) Swap(i, j int) {
 	s[i], s[j] = s[j], s[i]
@@ -170,7 +177,13 @@ func (s DownloadSpeedSet) Len() int {
 	return len(s)
 }
 func (s DownloadSpeedSet) Less(i, j int) bool {
-	return s[i].DownloadSpeed > s[j].DownloadSpeed
+	if s[i].DownloadSpeed != s[j].DownloadSpeed {
+		return s[i].DownloadSpeed > s[j].DownloadSpeed
+	}
+	if s[i].Delay != s[j].Delay {
+		return s[i].Delay < s[j].Delay
+	}
+	return s[i].Jitter < s[j].Jitter
 }
 func (s DownloadSpeedSet) Swap(i, j int) {
 	s[i], s[j] = s[j], s[i]
