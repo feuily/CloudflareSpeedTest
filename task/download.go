@@ -57,11 +57,18 @@ func TestDownloadSpeed(ipSet utils.PingDelaySet) (speedSet utils.DownloadSpeedSe
 		utils.Yellow.Println("[信息] 延迟测速结果 IP 数量为 0，跳过下载测速。")
 		return
 	}
-	testNum := TestCount                        // 等待下载测速的队列数量 先默认等于 下载测速数量(-dn）
-	if len(ipSet) < TestCount || MinSpeed > 0 { // 如果延迟测速并过滤后的 IP 数组长度(IP数量) 小于 下载测速数量(-dn），（即 -dn 预期数量是不够的），或者指定了 下载测速下限 (-sl) 条件（这就可能要全部下载测速一遍，直到找齐预期数量或测完为止），则 等待下载测速的队列数量 修正为 IP 数量
+	if shouldUseTwoStageDownload(len(ipSet)) {
+		return testDownloadSpeedTwoStage(ipSet)
+	}
+	return testDownloadSpeedSingleStage(ipSet)
+}
+
+func testDownloadSpeedSingleStage(ipSet utils.PingDelaySet) (speedSet utils.DownloadSpeedSet) {
+	testNum := TestCount
+	if len(ipSet) < TestCount || MinSpeed > 0 {
 		testNum = len(ipSet)
 	}
-	if testNum < TestCount { // 如果 等待下载测速的队列数量 小于 下载测速数量(-dn），（显然 -dn 预期数量是不够的），所以 下载测速数量(-dn）修正为 等待下载测速的队列数量
+	if testNum < TestCount {
 		TestCount = testNum
 	}
 
@@ -76,7 +83,7 @@ func TestDownloadSpeed(ipSet utils.PingDelaySet) (speedSet utils.DownloadSpeedSe
 	for i := 0; i < testNum; i++ {
 		ip := ipSet[i].IP.String()
 		bar.Grow(0, formatDownloadStatus(ip, 0))
-		speed, colo := downloadHandler(ipSet[i].IP, func(currentSpeed float64) {
+		speed, colo := downloadHandler(ipSet[i].IP, Timeout, func(currentSpeed float64) {
 			bar.Grow(0, formatDownloadStatus(ip, currentSpeed))
 		})
 		ipSet[i].DownloadSpeed = speed
@@ -103,6 +110,104 @@ func TestDownloadSpeed(ipSet utils.PingDelaySet) (speedSet utils.DownloadSpeedSe
 	// 按速度排序
 	sort.Sort(speedSet)
 	return
+}
+
+func testDownloadSpeedTwoStage(ipSet utils.PingDelaySet) utils.DownloadSpeedSet {
+	previewTimeout := calculatePreviewTimeout(Timeout)
+	previewSet := make(utils.DownloadSpeedSet, 0, len(ipSet))
+	previewBar := utils.NewBar(len(ipSet), "预检:", "")
+	for i := range ipSet {
+		ip := ipSet[i].IP.String()
+		previewBar.Grow(0, formatDownloadStatus(ip, 0))
+		speed, colo := downloadHandler(ipSet[i].IP, previewTimeout, func(currentSpeed float64) {
+			previewBar.Grow(0, formatDownloadStatus(ip, currentSpeed))
+		})
+		item := ipSet[i]
+		item.DownloadSpeed = speed
+		if item.Colo == "" {
+			item.Colo = colo
+		}
+		previewSet = append(previewSet, item)
+		previewBar.Grow(1, "")
+	}
+	previewBar.Done()
+	sort.Sort(previewSet)
+
+	confirmLimit := calculateConfirmCount(len(previewSet))
+	if confirmLimit <= 0 {
+		return nil
+	}
+
+	utils.Cyan.Printf("开始确认测速（下限：%.2f MB/s, 预检：%d, 确认：%d）\n", MinSpeed, len(previewSet), confirmLimit)
+	confirmSet := make(utils.DownloadSpeedSet, 0, confirmLimit)
+	confirmBar := utils.NewBar(len(previewSet), "确认:", "")
+	for i := 0; i < confirmLimit && len(confirmSet) < TestCount; i++ {
+		item := previewSet[i]
+		ip := item.IP.String()
+		confirmBar.Grow(0, formatDownloadStatus(ip, 0))
+		speed, colo := downloadHandler(item.IP, Timeout, func(currentSpeed float64) {
+			confirmBar.Grow(0, formatDownloadStatus(ip, currentSpeed))
+		})
+		item.DownloadSpeed = speed
+		if item.Colo == "" {
+			item.Colo = colo
+		}
+		if speed >= MinSpeed*1024*1024 {
+			confirmSet = append(confirmSet, item)
+		}
+		confirmBar.Grow(1, "")
+	}
+	for i := confirmLimit; i < len(previewSet) && len(confirmSet) < TestCount; i++ {
+		item := previewSet[i]
+		ip := item.IP.String()
+		confirmBar.Grow(0, formatDownloadStatus(ip, 0))
+		speed, colo := downloadHandler(item.IP, Timeout, func(currentSpeed float64) {
+			confirmBar.Grow(0, formatDownloadStatus(ip, currentSpeed))
+		})
+		item.DownloadSpeed = speed
+		if item.Colo == "" {
+			item.Colo = colo
+		}
+		if speed >= MinSpeed*1024*1024 {
+			confirmSet = append(confirmSet, item)
+		}
+		confirmBar.Grow(1, "")
+	}
+	confirmBar.Done()
+	sort.Sort(confirmSet)
+	return confirmSet
+}
+
+func shouldUseTwoStageDownload(total int) bool {
+	return MinSpeed == 0 && total > TestCount*2
+}
+
+func calculatePreviewTimeout(timeout time.Duration) time.Duration {
+	if timeout <= 0 {
+		return time.Second
+	}
+	preview := timeout / 4
+	if preview < time.Second {
+		preview = time.Second
+	}
+	if preview > 2*time.Second {
+		preview = 2 * time.Second
+	}
+	if preview >= timeout {
+		preview = timeout
+	}
+	return preview
+}
+
+func calculateConfirmCount(total int) int {
+	confirmCount := TestCount * 2
+	if confirmCount < TestCount {
+		confirmCount = TestCount
+	}
+	if confirmCount > total {
+		confirmCount = total
+	}
+	return confirmCount
 }
 
 func formatDownloadStatus(ip string, speed float64) string {
@@ -148,11 +253,11 @@ func printDownloadDebugInfo(ip *net.IPAddr, err error, statusCode int, url, last
 }
 
 // return download Speed
-func downloadHandler(ip *net.IPAddr, onProgress func(float64)) (float64, string) {
+func downloadHandler(ip *net.IPAddr, timeout time.Duration, onProgress func(float64)) (float64, string) {
 	var lastRedirectURL string // 用于记录最后一次重定向目标，以便在访问错误时输出
 	client := &http.Client{
 		Transport: newRateLimitedTransport(&http.Transport{DialContext: getDialContext(ip)}),
-		Timeout:   Timeout,
+		Timeout:   timeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			lastRedirectURL = req.URL.String() // 记录每次重定向的目标，以便在访问错误时输出
 			if len(via) > 10 {                 // 限制最多重定向 10 次
@@ -202,17 +307,20 @@ func downloadHandler(ip *net.IPAddr, onProgress func(float64)) (float64, string)
 	colo := getHeaderColo(response.Header)
 
 	timeStart := time.Now()           // 开始时间（当前）
-	timeEnd := timeStart.Add(Timeout) // 加上下载测速时间得到的结束时间
+	timeEnd := timeStart.Add(timeout) // 加上下载测速时间得到的结束时间
 
 	contentLength := response.ContentLength // 文件大小
 	buffer := make([]byte, bufferSize)
 
 	var (
 		contentRead     int64 = 0
-		timeSlice             = Timeout / 100
+		timeSlice             = timeout / 100
 		timeCounter           = 1
 		lastContentRead int64 = 0
 	)
+	if timeSlice <= 0 {
+		timeSlice = time.Second / 10
+	}
 
 	var nextTime = timeStart.Add(timeSlice * time.Duration(timeCounter))
 	e := ewma.NewMovingAverage()
@@ -256,5 +364,8 @@ func downloadHandler(ip *net.IPAddr, onProgress func(float64)) (float64, string)
 			onProgress(float64(contentRead) / elapsed)
 		}
 	}
-	return e.Value() / (Timeout.Seconds() / 120), colo
+	if timeout <= 0 {
+		return e.Value(), colo
+	}
+	return e.Value() / (timeout.Seconds() / 120), colo
 }
