@@ -3,7 +3,6 @@ package utils
 import (
 	"encoding/csv"
 	"fmt"
-	"log"
 	"net"
 	"os"
 	"strconv"
@@ -80,16 +79,29 @@ func ExportCsv(data []CloudflareIPData) {
 	if noOutput() || len(data) == 0 {
 		return
 	}
+	rows := data
+	if PrintNum > 0 && len(rows) > PrintNum {
+		rows = rows[:PrintNum]
+	}
 	fp, err := os.Create(Output)
 	if err != nil {
-		log.Fatalf("创建文件[%s]失败：%v", Output, err)
+		Yellow.Printf("[警告] 创建结果文件[%s]失败：%v\n", Output, err)
 		return
 	}
 	defer fp.Close()
 	w := csv.NewWriter(fp) //创建一个新的写入文件流
-	_ = w.Write([]string{"IP 地址", "已发送", "已接收", "丢包率", "平均延迟", "下载速度(MB/s)", "地区码"})
-	_ = w.WriteAll(convertToString(data))
+	if err := w.Write([]string{"IP 地址", "已发送", "已接收", "丢包率", "平均延迟", "下载速度(MB/s)", "地区码"}); err != nil {
+		Yellow.Printf("[警告] 写入结果文件[%s]失败：%v\n", Output, err)
+		return
+	}
+	if err := w.WriteAll(convertToString(rows)); err != nil {
+		Yellow.Printf("[警告] 写入结果文件[%s]失败：%v\n", Output, err)
+		return
+	}
 	w.Flush()
+	if err := w.Error(); err != nil {
+		Yellow.Printf("[警告] 刷新结果文件[%s]失败：%v\n", Output, err)
+	}
 }
 
 func convertToString(data []CloudflareIPData) [][]string {
@@ -112,8 +124,8 @@ func (s PingDelaySet) FilterDelay() (data PingDelaySet) {
 		return s
 	}
 	for _, v := range s {
-		if v.Delay > InputMaxDelay { // 平均延迟上限，延迟大于条件最大值时，后面的数据都不满足条件，直接跳出循环
-			break
+		if v.Delay > InputMaxDelay { // 排序主键不是纯延迟，因此这里不能提前结束
+			continue
 		}
 		if v.Delay < InputMinDelay { // 平均延迟下限，延迟小于条件最小值时，不满足条件，跳过
 			continue

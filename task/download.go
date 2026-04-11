@@ -74,13 +74,18 @@ func TestDownloadSpeed(ipSet utils.PingDelaySet) (speedSet utils.DownloadSpeedSe
 	}
 	bar := utils.NewBar(TestCount, bar_b, "")
 	for i := 0; i < testNum; i++ {
-		speed, colo := downloadHandler(ipSet[i].IP)
+		ip := ipSet[i].IP.String()
+		bar.Grow(0, formatDownloadStatus(ip, 0))
+		speed, colo := downloadHandler(ipSet[i].IP, func(currentSpeed float64) {
+			bar.Grow(0, formatDownloadStatus(ip, currentSpeed))
+		})
 		ipSet[i].DownloadSpeed = speed
 		if ipSet[i].Colo == "" { // 只有当 Colo 是空的时候，才写入，否则代表之前是 httping 测速并获取过了
 			ipSet[i].Colo = colo
 		}
 		// 在每个 IP 下载测速后，以 [下载速度下限] 条件过滤结果
 		if speed >= MinSpeed*1024*1024 {
+			bar.Grow(0, formatDownloadStatus(ip, speed))
 			bar.Grow(1, "")
 			speedSet = append(speedSet, ipSet[i]) // 高于下载速度下限时，添加到新数组中
 			if len(speedSet) == TestCount {       // 凑够满足条件的 IP 时（下载测速数量 -dn），就跳出循环
@@ -98,6 +103,13 @@ func TestDownloadSpeed(ipSet utils.PingDelaySet) (speedSet utils.DownloadSpeedSe
 	// 按速度排序
 	sort.Sort(speedSet)
 	return
+}
+
+func formatDownloadStatus(ip string, speed float64) string {
+	if ip == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s %.2f MB/s", ip, speed/1024/1024)
 }
 
 func getDialContext(ip *net.IPAddr) func(ctx context.Context, network, address string) (net.Conn, error) {
@@ -136,10 +148,10 @@ func printDownloadDebugInfo(ip *net.IPAddr, err error, statusCode int, url, last
 }
 
 // return download Speed
-func downloadHandler(ip *net.IPAddr) (float64, string) {
+func downloadHandler(ip *net.IPAddr, onProgress func(float64)) (float64, string) {
 	var lastRedirectURL string // 用于记录最后一次重定向目标，以便在访问错误时输出
 	client := &http.Client{
-		Transport: &http.Transport{DialContext: getDialContext(ip)},
+		Transport: newRateLimitedTransport(&http.Transport{DialContext: getDialContext(ip)}),
 		Timeout:   Timeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			lastRedirectURL = req.URL.String() // 记录每次重定向的目标，以便在访问错误时输出
@@ -179,6 +191,9 @@ func downloadHandler(ip *net.IPAddr) (float64, string) {
 		}
 		return 0.0, ""
 	}
+	if onProgress != nil {
+		onProgress(0)
+	}
 
 	// 通过头部参数获取地区码
 	colo := getHeaderColo(response.Header)
@@ -207,6 +222,12 @@ func downloadHandler(ip *net.IPAddr) (float64, string) {
 			nextTime = timeStart.Add(timeSlice * time.Duration(timeCounter))
 			e.Add(float64(contentRead - lastContentRead))
 			lastContentRead = contentRead
+			if onProgress != nil {
+				elapsed := currentTime.Sub(timeStart).Seconds()
+				if elapsed > 0 {
+					onProgress(float64(contentRead) / elapsed)
+				}
+			}
 		}
 		// 如果超出下载测速时间，则退出循环（终止测速）
 		if currentTime.After(timeEnd) {
@@ -225,6 +246,12 @@ func downloadHandler(ip *net.IPAddr) (float64, string) {
 			e.Add(float64(contentRead-lastContentRead) / (float64(currentTime.Sub(last_time_slice)) / float64(timeSlice)))
 		}
 		contentRead += int64(bufferRead)
+	}
+	if onProgress != nil {
+		elapsed := time.Since(timeStart).Seconds()
+		if elapsed > 0 {
+			onProgress(float64(contentRead) / elapsed)
+		}
 	}
 	return e.Value() / (Timeout.Seconds() / 120), colo
 }

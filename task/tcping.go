@@ -14,6 +14,7 @@ import (
 const (
 	tcpConnectTimeout = time.Second * 1
 	maxRoutine        = 1000
+	httpingRoutineCap = 128
 	defaultRoutines   = 200
 	defaultPort       = 443
 	defaultPingTimes  = 4
@@ -37,6 +38,12 @@ type Ping struct {
 func checkPingDefault() {
 	if Routines <= 0 {
 		Routines = defaultRoutines
+	} else if Routines > maxRoutine {
+		Routines = maxRoutine
+	}
+	if Httping && Routines > httpingRoutineCap {
+		utils.Yellow.Printf("[提示] HTTPing 模式下并发过高可能触发服务商限速，已将并发从 %d 自动降到 %d。\n", Routines, httpingRoutineCap)
+		Routines = httpingRoutineCap
 	}
 	if TCPPort <= 0 || TCPPort >= 65535 {
 		TCPPort = defaultPort
@@ -44,6 +51,7 @@ func checkPingDefault() {
 	if PingTimes <= 0 {
 		PingTimes = defaultPingTimes
 	}
+	configureRequestLimiter()
 }
 
 func NewPing() *Ping {
@@ -63,6 +71,16 @@ func (p *Ping) Run() utils.PingDelaySet {
 	if len(p.ips) == 0 {
 		return p.csv
 	}
+	launchPause := time.Duration(0)
+	if Httping && Routines > 0 {
+		launchPause = time.Millisecond * time.Duration(Routines/50)
+		if launchPause < time.Millisecond {
+			launchPause = time.Millisecond
+		}
+		if launchPause > 5*time.Millisecond {
+			launchPause = 5 * time.Millisecond
+		}
+	}
 	if Httping {
 		utils.Cyan.Printf("开始延迟测速（模式：HTTP, 端口：%d, 范围：%v ~ %v ms, 丢包：%.2f)\n", TCPPort, utils.InputMinDelay.Milliseconds(), utils.InputMaxDelay.Milliseconds(), utils.InputMaxLossRate)
 	} else {
@@ -72,6 +90,9 @@ func (p *Ping) Run() utils.PingDelaySet {
 		p.wg.Add(1)
 		p.control <- false
 		go p.start(ip)
+		if launchPause > 0 {
+			time.Sleep(launchPause)
+		}
 	}
 	p.wg.Wait()
 	p.bar.Done()
@@ -87,6 +108,7 @@ func (p *Ping) start(ip *net.IPAddr) {
 
 // bool connectionSucceed float32 time
 func (p *Ping) tcping(ip *net.IPAddr) (bool, time.Duration) {
+	waitForRequestSlot()
 	startTime := time.Now()
 	var fullAddress string
 	if isIPv4(ip.String()) {
@@ -119,23 +141,26 @@ func (p *Ping) checkConnection(ip *net.IPAddr) (recv int, totalDelay time.Durati
 	return
 }
 
-func (p *Ping) appendIPData(data *utils.PingData) {
+func (p *Ping) appendIPData(data *utils.PingData) int {
 	p.m.Lock()
 	defer p.m.Unlock()
 	p.csv = append(p.csv, utils.CloudflareIPData{
 		PingData: data,
 	})
+	return len(p.csv)
+}
+
+func (p *Ping) availableCount() int {
+	p.m.Lock()
+	defer p.m.Unlock()
+	return len(p.csv)
 }
 
 // handle tcping
 func (p *Ping) tcpingHandler(ip *net.IPAddr) {
 	recv, totalDlay, colo := p.checkConnection(ip)
-	nowAble := len(p.csv)
-	if recv != 0 {
-		nowAble++
-	}
-	p.bar.Grow(1, strconv.Itoa(nowAble))
 	if recv == 0 {
+		p.bar.Grow(1, strconv.Itoa(p.availableCount()))
 		return
 	}
 	data := &utils.PingData{
@@ -145,5 +170,5 @@ func (p *Ping) tcpingHandler(ip *net.IPAddr) {
 		Delay:    totalDlay / time.Duration(recv),
 		Colo:     colo,
 	}
-	p.appendIPData(data)
+	p.bar.Grow(1, strconv.Itoa(p.appendIPData(data)))
 }

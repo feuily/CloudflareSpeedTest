@@ -78,6 +78,7 @@ https://github.com/XIU2/CloudflareSpeedTest
 `
 	var minDelay, maxDelay, downloadTime int
 	var maxLossRate float64
+	var requestQPS int
 	flag.IntVar(&task.Routines, "n", 200, "延迟测速线程")
 	flag.IntVar(&task.PingTimes, "t", 4, "延迟测速次数")
 	flag.IntVar(&task.TestCount, "dn", 10, "下载测速数量")
@@ -93,6 +94,7 @@ https://github.com/XIU2/CloudflareSpeedTest
 	flag.IntVar(&minDelay, "tll", 0, "平均延迟下限")
 	flag.Float64Var(&maxLossRate, "tlr", 1, "丢包几率上限")
 	flag.Float64Var(&task.MinSpeed, "sl", 0, "下载速度下限")
+	flag.IntVar(&requestQPS, "qps", 0, "全局请求速率限制")
 
 	flag.IntVar(&utils.PrintNum, "p", 10, "显示结果数量")
 	flag.StringVar(&task.IPFile, "f", "ip.txt", "IP段数据文件")
@@ -114,6 +116,7 @@ https://github.com/XIU2/CloudflareSpeedTest
 	utils.InputMaxDelay = time.Duration(maxDelay) * time.Millisecond
 	utils.InputMinDelay = time.Duration(minDelay) * time.Millisecond
 	utils.InputMaxLossRate = float32(maxLossRate)
+	task.RequestQPS = requestQPS
 	task.Timeout = time.Duration(downloadTime) * time.Second
 	task.HttpingCFColomap = task.MapColoMap()
 
