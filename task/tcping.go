@@ -132,10 +132,16 @@ func (p *Ping) checkConnection(ip *net.IPAddr) (recv int, totalDelay time.Durati
 		return
 	}
 	colo = "" // TCPing 不获取 colo
+	failed := 0
 	for i := 0; i < PingTimes; i++ {
 		if ok, delay := p.tcping(ip); ok {
 			recv++
 			totalDelay += delay
+			continue
+		}
+		failed++
+		if shouldAbortByLossRate(failed) {
+			break
 		}
 	}
 	return

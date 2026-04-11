@@ -109,6 +109,7 @@ func (p *Ping) httping(ip *net.IPAddr) (int, time.Duration, string) {
 	}
 
 	// 循环测速计算延迟
+	failed := 0
 	for i := 1; i < PingTimes; i++ {
 		request, err := http.NewRequest(http.MethodHead, URL, nil)
 		if err != nil {
@@ -125,12 +126,20 @@ func (p *Ping) httping(ip *net.IPAddr) (int, time.Duration, string) {
 		response, err := hc.Do(request)
 		if err != nil {
 			reportRequestFailure()
+			failed++
+			if shouldAbortByLossRate(failed) {
+				break
+			}
 			continue
 		}
 		if !isAllowedHttpingStatus(response.StatusCode) {
 			reportRequestFailure()
+			failed++
 			io.Copy(io.Discard, response.Body)
 			_ = response.Body.Close()
+			if shouldAbortByLossRate(failed) {
+				break
+			}
 			continue
 		}
 		reportRequestSuccess()
